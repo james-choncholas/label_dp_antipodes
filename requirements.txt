@@ -1,6 +1,7 @@
 opacus==0.15.0
 torch
 torchvision
+torchtext==0.6.0
 simple_parsing
 tqdm
 tensorboard

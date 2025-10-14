@@ -11,9 +11,10 @@ from simple_parsing import ArgumentParser
 from torch.utils.tensorboard import SummaryWriter
 
 from lib.dataset.cifar import get_cifar10, get_cifar100
+from lib.dataset.mnist import get_mnist
 from lib.fixmatch import train
 from lib.pate.accountant import run_analysis
-from lib.pate.settings import PateStudentConfig, PateCommonConfig
+from lib.pate.settings import PateStudentConfig, PateCommonConfig, FixmatchModelConfig, FixmatchConfig
 from lib.pate.utils import (
     set_seed,
     noisy_threshold_labels,
@@ -82,6 +83,34 @@ def main(
         test_dataset, student_dataset = datasets["test"], datasets["student"]
 
         n_classes = 100
+    elif config_common.dataset == "mnist":
+        datasets = get_mnist(
+            root=config_common.dataset_dir,
+            student_dataset_max_size=config_common.student_dataset_max_size,
+            student_seed=config_common.seed + 100
+            # we want different seeds for splitting data between teachers and for picking student subset
+        )
+        labeled_dataset, unlabeled_dataset = datasets["labeled"], datasets["unlabeled"]
+        test_dataset, student_dataset = datasets["test"], datasets["student"]
+        config_student = PateStudentConfig(
+            noise=config_student.noise,
+            fixmatch=FixmatchConfig(
+                model=FixmatchModelConfig(model_name="simple"),
+                mu=config_student.fixmatch.mu,
+                warmup=config_student.fixmatch.warmup,
+                use_ema=config_student.fixmatch.use_ema,
+                ema_decay=config_student.fixmatch.ema_decay,
+                amp=config_student.fixmatch.amp,
+                opt_level=config_student.fixmatch.opt_level,
+                T=config_student.fixmatch.T,
+                threshold=config_student.fixmatch.threshold,
+                lambda_u=config_student.fixmatch.lambda_u,
+            ),
+            n_samples=config_student.n_samples,
+            learning=config_student.learning,
+        )
+        fixmatch_config = config_student.fixmatch
+        n_classes = 10
     else:
         raise ValueError(f"Unexpected dataset: {config_common.dataset}")
 
@@ -103,6 +132,7 @@ def main(
 
     labeled_dataset.data = labeled_dataset.data[indices]
     labeled_dataset.targets = labels
+
 
     noisy_agg_accuracy = noisy_votes_aggregation_accuracy(
         labeled_dataset, student_dataset, threshold_indices.squeeze()

@@ -28,7 +28,7 @@ SOFTWARE.
 
 import os
 import numpy as np
-from torchvision.datasets import CIFAR10, CIFAR100
+from torchvision.datasets import CIFAR10, CIFAR100, MNIST
 
 
 def rand_pos_and_labels(trainset, N, seed=None):
@@ -40,8 +40,12 @@ def rand_pos_and_labels(trainset, N, seed=None):
     num_classes = len(trainset.classes)
     rand_positions = np.random.choice(len(trainset.data), N, replace=False)
     rand_labels = []
+    targets = trainset.targets
+    if not isinstance(targets, list):
+        targets = targets.tolist()
+
     for idx in rand_positions:
-        y = trainset.targets[idx]
+        y = targets[idx]
         new_y = np.random.choice(list(set(range(num_classes)) - {y}))
         rand_labels.append(new_y)
 
@@ -153,7 +157,10 @@ def get_confidences(confs_on_canary, canary_labels, canary_positions, train_data
     c1 = c1.reshape(-1, 1)
 
     # build a matrix of size (1000, C-2) of model confidences in all other incorrect classes
-    true_labels = np.asarray(train_dataset.targets)[canary_positions]
+    targets = train_dataset.targets
+    if not isinstance(targets, list):
+        targets = targets.tolist()
+    true_labels = np.asarray(targets)[canary_positions]
     incorrect_labels = [
         sorted(list(set(range(len(train_dataset.classes))) - {y1, y2}))
         for (y1, y2) in zip(true_labels, canary_labels)
@@ -175,7 +182,7 @@ def get_confidences(confs_on_canary, canary_labels, canary_positions, train_data
 canary_seed = 11337
 canary_N = 1000
 
-for data in ["cifar10", "cifar100"]:
+for data in ["cifar10", "cifar100", "mnist"]:
     for algo in ["PATE", "RR", "RR_gaussian"]:
         for acc in ["HH", "H", "M", "L"]:
 
@@ -184,8 +191,12 @@ for data in ["cifar10", "cifar100"]:
 
             if data == "cifar10":
                 train_dataset = CIFAR10(root="/tmp/cifar10", train=True, download=False)
-            else:
+            elif data == "cifar100":
                 train_dataset = CIFAR100(root="/tmp/cifar100", train=True, download=False)
+            elif data == "mnist":
+                train_dataset = MNIST(root="/tmp/mnist", train=True, download=False)
+            else:
+                raise ValueError(f"Unknown dataset: {data}")
 
             # re-generate the canaries
             canary_positions, canary_labels = rand_pos_and_labels(
@@ -196,10 +207,16 @@ for data in ["cifar10", "cifar100"]:
                     25165634,
                     4641,
                 )
-            else:
+            elif data == "cifar100":
                 assert (np.sum(canary_positions), np.sum(canary_labels)) == (
                     25165634,
                     50213,
+                )
+            elif data == "mnist":
+                # MNist has 60000 samples instead of 50000 of cifar
+                assert (np.sum(canary_positions), np.sum(canary_labels)) == (
+                    30137353,
+                    4539,
                 )
 
             # model confidence on the canaries
@@ -211,7 +228,7 @@ for data in ["cifar10", "cifar100"]:
     print()
 
 # 10 x 100
-for data in ["cifar10", "cifar100"]:
+for data in ["cifar10", "cifar100", "mnist"]:
     for algo in ["RR"]:
         for acc  in ["HH", "H", "M", "L"]:
 
@@ -220,8 +237,12 @@ for data in ["cifar10", "cifar100"]:
 
             if data == "cifar10":
                 train_dataset = CIFAR10(root="/tmp/cifar10", train=True, download=False)
-            else:
+            elif data == "cifar100":
                 train_dataset = CIFAR100(root="/tmp/cifar100", train=True, download=False)
+            elif data == "mnist":
+                train_dataset = MNIST(root="/tmp/mnist", train=True, download=False)
+            else:
+                raise ValueError(f"Unknown dataset: {data}")
 
             # model confidence on the canaries
             confs_on_canary = np.load(f"confs_10x100/confs_{data}_{algo}_{acc}.npy")

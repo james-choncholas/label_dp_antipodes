@@ -87,42 +87,32 @@ def de_interleave(x, size):
 
 
 def create_model(config: FixmatchModelConfig, num_classes: int):
-    return wideresnet(
-        depth=config.depth,
-        widen_factor=config.width,
-        dropout=0,
-        num_classes=num_classes,
-    )
+    if config.model_name == "wideresnet":
+        from lib.models.wide_resnet import wideresnet
+        return wideresnet(
+            depth=config.depth,
+            widen_factor=config.width,
+            dropout=0,
+            num_classes=num_classes,
+        )
+    elif config.model_name == "simple":
+        from lib.models.simple import simple
+        return simple(
+            num_classes=num_classes
+        )
+    elif config.model_name == "simple_conv":
+        from lib.models.simple import simple_conv
+        return simple_conv(
+            num_classes=num_classes
+        )
+    else:
+        raise ValueError(f"Unknown model name: {config.model_name}")
 
 
 def test(device, test_loader, model):
     batch_time = AverageMeter()
     data_time = AverageMeter()
     losses = AverageMeter()
-    top1 = AverageMeter()
-    top5 = AverageMeter()
-    end = time.time()
-
-    with torch.no_grad():
-        for (inputs, targets) in test_loader:
-            data_time.update(time.time() - end)
-            model.eval()
-
-            inputs = inputs.to(device)
-            targets = targets.to(device)
-            outputs = model(inputs)
-            loss = F.cross_entropy(outputs, targets)
-
-            prec1, prec5 = accuracy(outputs, targets, topk=(1, 5))
-            losses.update(loss.item(), inputs.shape[0])
-            top1.update(prec1.item(), inputs.shape[0])
-            top5.update(prec5.item(), inputs.shape[0])
-            batch_time.update(time.time() - end)
-            end = time.time()
-
-    logging.info("top-1 acc: {:.2f}".format(top1.avg))
-    logging.info("top-5 acc: {:.2f}".format(top5.avg))
-    return losses.avg, top1.avg
 
 
 def train(

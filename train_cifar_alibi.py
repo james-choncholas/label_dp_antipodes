@@ -7,7 +7,7 @@ Runs CIFAR10 and CIFAR100 training with ALIBI for Label Differential Privacy
 import argparse
 import os
 import random
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 import torch
@@ -22,10 +22,14 @@ import torchvision.transforms as transforms
 from lib import models
 from lib.alibi import Ohm, RandomizedLabelPrivacy, NoisedCIFAR
 from lib.dataset.canary import fill_canaries
+from lib.dataset.imdb import get_imdb_dataloaders
+from lib.dataset.mnist_38 import get_mnist_38
+from lib.models.sentiment import SentimentModel
 from opacus.utils import stats
-from torchvision.datasets import CIFAR10, CIFAR100
+from torchvision.datasets import CIFAR10, CIFAR100, MNIST
 from tqdm import tqdm
 
+PAD_IDX = 1
 #######################################################################
 # Settings
 #######################################################################
@@ -54,13 +58,14 @@ class Settings:
     dataset: str = "cifar100"
     canary: int = 0
     arch: str = "wide-resnet"
-    privacy: LabelPrivacy = LabelPrivacy()
-    learning: Learning = Learning()
+    privacy: LabelPrivacy = field(default_factory=LabelPrivacy)
+    learning: Learning = field(default_factory=Learning)
     gpu: int = -1
     world_size: int = 1
     out_dir_base: str = "/tmp/alibi/"
     data_dir_root: str = "/tmp/"
     seed: int = 0
+    dataset_choices: list = field(default_factory=lambda: ["cifar10", "cifar100", "mnist", "mnist38", "imdb"])
 
 
 MAX_GRAD_INF = 1e6
@@ -78,6 +83,9 @@ FIXMATCH_CIFAR10_MEAN = (0.4914, 0.4822, 0.4465)
 FIXMATCH_CIFAR10_STD = (0.2471, 0.2435, 0.2616)
 FIXMATCH_CIFAR100_MEAN = (0.5071, 0.4867, 0.4408)
 FIXMATCH_CIFAR100_STD = (0.2675, 0.2565, 0.2761)
+
+MNIST_MEAN = (0.1307,)
+MNIST_STD = (0.3081,)
 
 #######################################################################
 # Stat Collection settings
@@ -117,23 +125,30 @@ def accuracy(preds, labels):
     return (preds == labels).mean()
 
 
-def train(model, train_loader, optimizer, criterion, device):
+def train(model, train_loader, optimizer, criterion, device, dataset_name):
     model.train()
     losses = []
     acc = []
 
     for i, batch in enumerate(tqdm(train_loader)):
-
-        images = batch[0].to(device)
-        targets = batch[1].to(device)
-        labels = targets if len(batch) == 2 else batch[2].to(device)
-
-        # compute output
         optimizer.zero_grad()
-        output = model(images)
-        loss = criterion(output, targets)
-        preds = np.argmax(output.detach().cpu().numpy(), axis=1)
-        labels = labels.detach().cpu().numpy()
+        if dataset_name == "imdb":
+            text, text_lengths = batch.text
+            targets = batch.label
+            output = model(text, text_lengths)
+            loss = criterion(output, targets)
+            preds = np.argmax(output.detach().cpu().numpy(), axis=1)
+            labels = targets.detach().cpu().numpy()
+        else:
+            images = batch[0].to(device)
+            targets = batch[1].to(device)
+            labels = targets if len(batch) == 2 else batch[2].to(device)
+
+            # compute output
+            output = model(images)
+            loss = criterion(output, targets)
+            preds = np.argmax(output.detach().cpu().numpy(), axis=1)
+            labels = labels.detach().cpu().numpy()
 
         # measure accuracy and record loss
         acc1 = accuracy(preds, labels)
@@ -148,22 +163,30 @@ def train(model, train_loader, optimizer, criterion, device):
     return np.mean(acc), np.mean(losses)
 
 
-def test(model, test_loader, criterion, epoch, device):
+def test(model, test_loader, criterion, epoch, device, dataset_name):
     model.eval()
     losses = []
     acc = []
 
     with torch.no_grad():
-        for images, target in tqdm(test_loader):
-            images = images.to(device)
-            target = target.to(device)
+        for batch in tqdm(test_loader):
+            if dataset_name == "imdb":
+                text, text_lengths = batch.text
+                targets = batch.label
+                output = model(text, text_lengths)
+                loss = criterion(output, targets)
+                preds = np.argmax(output.detach().cpu().numpy(), axis=1)
+                labels = targets.detach().cpu().numpy()
+            else:
+                images = batch[0].to(device)
+                target = batch[1].to(device)
 
-            output = model(images)
-            loss = criterion(output, target)
-            preds = np.argmax(output.detach().cpu().numpy(), axis=1)
-            labels = target.detach().cpu().numpy()
+                output = model(images)
+                loss = criterion(output, target)
+                preds = np.argmax(output.detach().cpu().numpy(), axis=1)
+                labels = target.detach().cpu().numpy()
+            
             acc1 = accuracy(preds, labels)
-
             losses.append(loss.item())
             acc.append(acc1)
 
@@ -193,6 +216,22 @@ def create_model(arch: str, num_classes: int):
             dropout=0,
             num_classes=num_classes,
         )
+    elif "simple" in arch.lower():
+        print("Created Simple Model!")
+        if "conv" in arch.lower():
+            from lib.models.simple import simple_conv
+            return simple_conv(num_classes=num_classes)
+        from lib.models.simple import simple
+        return simple(num_classes=num_classes)
+    elif "sentiment" in arch.lower():
+        print("Created Sentiment Model!")
+        return SentimentModel(
+            vocab_size=10000,
+            embedding_dim=32,
+            output_dim=num_classes,
+            dropout=0.5,
+            pad_idx=PAD_IDX,
+        )
     else:
         print("Created simple Resnet Model!")
         return models.resnet18(num_classes=num_classes)
@@ -218,7 +257,19 @@ def main_worker(settings: Settings):
     os.makedirs(out_dir_base, exist_ok=True)
 
     best_acc = 0
-    num_classes = 100 if settings.dataset.lower() == "cifar100" else 10
+    if settings.dataset.lower() == "cifar100":
+        num_classes = 100
+    elif settings.dataset.lower() == "cifar10":
+        num_classes = 10
+    elif settings.dataset.lower() == "mnist":
+        num_classes = 10
+    elif settings.dataset.lower() == "mnist38":
+        num_classes = 2
+    elif settings.dataset.lower() == "imdb":
+        num_classes = 2
+    else:
+        raise ValueError(f"Unknown dataset: {settings.dataset}")
+
     model = create_model(settings.arch, num_classes)
     device = torch.device("cuda") if settings.gpu >= 0 else torch.device("cpu")
     model = model.to(device)
@@ -244,81 +295,128 @@ def main_worker(settings: Settings):
         weight_decay=settings.learning.weight_decay,
         nesterov=True,
     )
-
     # DEFINE DATA
-    rand_aug = [
-        transforms.RandomHorizontalFlip(),
-        transforms.RandomCrop(32, padding=4, padding_mode="reflect"),
-    ]
-    normalize = []
-    if settings.dataset.lower() == "cifar100":
-        normalize = [
-            transforms.ToTensor(),
-            transforms.Normalize(FIXMATCH_CIFAR100_MEAN, FIXMATCH_CIFAR100_STD),
-        ]
-    else:  # CIFAR-10
-        normalize = [
-            transforms.ToTensor(),
-            transforms.Normalize(FIXMATCH_CIFAR10_MEAN, FIXMATCH_CIFAR10_STD),
-        ]
-    train_transform = transforms.Compose(
-        rand_aug + normalize if settings.learning.random_aug else normalize
-    )
-
-    # train data
-    CIFAR = CIFAR100 if settings.dataset.lower() == "cifar100" else CIFAR10
-    settings.data_dir_root = os.path.join(
-        settings.data_dir_root, settings.dataset.lower()
-    )
-    train_dataset = CIFAR(
-        train=True,
-        transform=train_transform,
-        root=settings.data_dir_root,
-        download=True,
-    )
-    if settings.canary > 0 and settings.canary < len(train_dataset):
-        # capture debug info
-        original_label_sum = sum(train_dataset.targets)
-        original_last10_labels = [train_dataset[-i][1] for i in range(1, 11)]
-        # inject canaries
-        train_dataset = fill_canaries(
-            train_dataset, num_classes, N=settings.canary, seed=settings.seed
+    if settings.dataset.lower() == "imdb":
+        imdb_data = get_imdb_dataloaders(
+            root=settings.data_dir_root,
+            batch_size=settings.learning.batch_size,
+            device=device,
+            student_seed=settings.seed
         )
-        # capture debug info
-        canary_label_sum = sum(train_dataset.targets)
-        canary_last10_labels = [train_dataset[-i][1] for i in range(1, 11)]
-        # verify presence
-        if original_label_sum == canary_label_sum:
-            raise Exception(
-                "Canary infiltration has failed."
-                f"\nOriginal label sum: {original_label_sum} vs"
-                f" Canary label sum: {canary_label_sum}"
-                f"\nOriginal last 10 labels: {original_last10_labels} vs"
-                f" Canary last 10 labels: {canary_last10_labels}"
+        train_loader = imdb_data["labeled"]
+        test_loader = imdb_data["test"]
+        vocab = imdb_data["vocab"]
+        # Overwrite PAD_IDX with the one from vocab
+        global PAD_IDX
+        PAD_IDX = imdb_data["pad_idx"]
+        # Update model with the correct pad_idx
+        model = create_model(settings.arch, num_classes)
+        model = model.to(device)
+        optimizer = optim.SGD(
+            model.parameters(),
+            lr=settings.learning.lr,
+            momentum=settings.learning.momentum,
+            weight_decay=settings.learning.weight_decay,
+            nesterov=True,
+        )
+        train_dataset = None # Not used in the same way for IMDB
+    else:
+        if settings.dataset.lower() == "mnist":
+            CIFAR = MNIST
+            rand_aug = []
+            normalize = [
+                transforms.ToTensor(),
+                transforms.Normalize(MNIST_MEAN, MNIST_STD),
+            ]
+        elif settings.dataset.lower() == "mnist38":
+            CIFAR = get_mnist_38
+            rand_aug = []
+            normalize = [
+                transforms.ToTensor(),
+                transforms.Normalize(MNIST_MEAN, MNIST_STD),
+            ]
+        else:
+            CIFAR = CIFAR100 if settings.dataset.lower() == "cifar100" else CIFAR10
+            rand_aug = [
+                transforms.RandomHorizontalFlip(),
+                transforms.RandomCrop(32, padding=4, padding_mode="reflect"),
+            ]
+            if settings.dataset.lower() == "cifar100":
+                normalize = [
+                    transforms.ToTensor(),
+                    transforms.Normalize(FIXMATCH_CIFAR100_MEAN, FIXMATCH_CIFAR100_STD),
+                ]
+            else:  # CIFAR-10
+                normalize = [
+                    transforms.ToTensor(),
+                    transforms.Normalize(FIXMATCH_CIFAR10_MEAN, FIXMATCH_CIFAR10_STD),
+                ]
+
+        train_transform = transforms.Compose(
+            rand_aug + normalize if settings.learning.random_aug else normalize
+        )
+        settings.data_dir_root = os.path.join(
+            settings.data_dir_root, settings.dataset.lower()
+        )
+        if settings.dataset.lower() == "mnist38":
+            datasets = get_mnist_38(
+                root=settings.data_dir_root,
+                student_dataset_max_size=1000,
+                student_seed=settings.seed,
             )
-    if noise_only_once:
-        train_dataset = NoisedCIFAR(
-            train_dataset, num_classes, randomized_label_privacy
+            train_dataset = datasets["labeled"]
+            test_dataset = datasets["test"]
+        else:
+            train_dataset = CIFAR(
+                train=True,
+                transform=train_transform,
+                root=settings.data_dir_root,
+                download=True,
+            )
+            test_dataset = CIFAR(
+                train=False,
+                transform=transforms.Compose(normalize),
+                root=settings.data_dir_root,
+                download=True,
+            )
+        if settings.canary > 0 and settings.canary < len(train_dataset):
+            # capture debug info
+            original_label_sum = sum(train_dataset.targets)
+            original_last10_labels = [train_dataset[-i][1] for i in range(1, 11)]
+            # inject canaries
+            train_dataset = fill_canaries(
+                train_dataset, num_classes, N=settings.canary, seed=settings.seed
+            )
+            # capture debug info
+            canary_label_sum = sum(train_dataset.targets)
+            canary_last10_labels = [train_dataset[-i][1] for i in range(1, 11)]
+            # verify presence
+            if original_label_sum == canary_label_sum:
+                raise Exception(
+                    "Canary infiltration has failed."
+                    f"\nOriginal label sum: {original_label_sum} vs"
+                    f" Canary label sum: {canary_label_sum}"
+                    f"\nOriginal last 10 labels: {original_last10_labels} vs"
+                    f" Canary last 10 labels: {canary_last10_labels}"
+                )
+        if noise_only_once:
+            train_dataset = NoisedCIFAR(
+                train_dataset, num_classes, randomized_label_privacy
+            )
+        train_loader = data.DataLoader(
+            train_dataset,
+            batch_size=settings.learning.batch_size,
+            shuffle=True,
+            drop_last=True,
         )
-    train_loader = data.DataLoader(
-        train_dataset,
-        batch_size=settings.learning.batch_size,
-        shuffle=True,
-        drop_last=True,
-    )
 
-    # test data
-    test_dataset = CIFAR(
-        train=False,
-        transform=transforms.Compose(normalize),
-        root=settings.data_dir_root,
-        download=True,
-    )
-    test_loader = data.DataLoader(
-        test_dataset, batch_size=settings.learning.batch_size, shuffle=False
-    )
+        # test data
+        test_loader = data.DataLoader(
+            test_dataset, batch_size=settings.learning.batch_size, shuffle=False
+        )
 
     cudnn.benchmark = True
+
 
     stats_dir = os.path.join(out_dir_base, "stats")
     summary_writer = enable_stats(stats_dir)
@@ -333,13 +431,14 @@ def main_worker(settings: Settings):
 
         # train for one epoch
         model, train_loader, optimizer, criterion, device
-        acc, loss = train(model, train_loader, optimizer, criterion, device)
+        acc, loss = train(model, train_loader, optimizer, criterion, device, settings.dataset)
 
         epsilon, alpha = randomized_label_privacy.privacy
         label_change = 0
-        label_change = (
-            train_dataset.label_change if noise_only_once else criterion.label_change
-        )
+        if settings.dataset.lower() != "imdb":
+            label_change = (
+                train_dataset.label_change if noise_only_once else criterion.label_change
+            )
 
         stats.update(
             stats.StatType.TRAIN,
@@ -353,7 +452,7 @@ def main_worker(settings: Settings):
         # evaluate on validation set
         if randomized_label_privacy is not None:
             randomized_label_privacy.eval()
-        acc, loss = test(model, test_loader, criterion, epoch, device)
+        acc, loss = test(model, test_loader, criterion, epoch, device, settings.dataset)
         stats.update(stats.StatType.TEST, top1Acc=acc, loss=loss)
 
         # remember best acc@1 and save checkpoint
@@ -390,12 +489,14 @@ def main():
         "--dataset",
         type=str,
         default="cifar10",
+        choices=["cifar10", "cifar100", "mnist", "mnist38", "imdb"],
         help="Dataset to run training on (cifar100 or cifar10)",
     )
     parser.add_argument(
         "--arch",
         type=str,
         default="wide-resnet",
+        choices=["wide-resnet", "resnet", "simple", "simple_conv", "sentiment"],
         help="Resnet-18 architecture (wide-resnet vs resnet)",
     )
     # learning

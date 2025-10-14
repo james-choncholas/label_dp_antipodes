@@ -37,6 +37,7 @@ class LearningConfig:
 
 @dataclass(eq=True, frozen=True)
 class FixmatchModelConfig:
+    model_name: str = "wideresnet"
     width: int = 4
     depth: int = 28
     cardinality: int = 4

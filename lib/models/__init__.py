@@ -3,5 +3,6 @@
 
 from .resnet import resnet18
 from .wide_resnet import wideresnet
+from .simple import simple, simple_conv
 
-__all__ = ["resnet18", "wideresnet"]
+__all__ = ["resnet18", "wideresnet", "simple", "simple_conv"]

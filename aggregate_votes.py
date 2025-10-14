@@ -8,6 +8,8 @@ import torch
 from simple_parsing import ArgumentParser
 
 from lib.dataset.cifar import get_cifar10, get_cifar100
+from lib.dataset.mnist import get_mnist
+from lib.dataset.imdb import get_imdb
 from lib.pate.settings import PateCommonConfig
 from lib.pate.utils import votes_aggregation_accuracy
 
@@ -39,6 +41,12 @@ def main(config_common: PateCommonConfig):
         )
     elif config_common.dataset == "cifar100":
         datasets = get_cifar100(
+            root=config_common.dataset_dir,
+            student_dataset_max_size=config_common.student_dataset_max_size,
+            student_seed=config_common.seed + 100,
+        )
+    elif config_common.dataset == "mnist":
+        datasets = get_mnist(
             root=config_common.dataset_dir,
             student_dataset_max_size=config_common.student_dataset_max_size,
             student_seed=config_common.seed + 100,

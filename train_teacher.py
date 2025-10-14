@@ -15,8 +15,12 @@ from torch.utils.tensorboard import SummaryWriter
 
 from lib.dataset.canary import fill_canaries
 from lib.dataset.cifar import get_cifar10, get_cifar100
+from lib.dataset.imdb import get_imdb_dataloaders
+from lib.dataset.mnist import get_mnist
 from lib.fixmatch import train
-from lib.pate.settings import PateTeacherConfig, PateCommonConfig
+from lib.models.sentiment import SentimentModel
+from lib.pate.settings import PateTeacherConfig, PateCommonConfig, FixmatchModelConfig, FixmatchConfig
+
 
 
 def partition_dataset_indices(dataset_len, n_teachers, teacher_id, seed=None):
@@ -101,6 +105,87 @@ def main(
         test_dataset, student_dataset = datasets["test"], datasets["student"]
 
         n_classes = 100
+    elif config_common.dataset == "mnist":
+        datasets = get_mnist(
+            root=config_common.dataset_dir,
+            student_dataset_max_size=config_common.student_dataset_max_size,
+            student_seed=config_common.seed + 100
+            # we want different seeds for splitting data between teachers and for picking student subset
+        )
+        labeled_dataset, unlabeled_dataset = datasets["labeled"], datasets["unlabeled"]
+        test_dataset, student_dataset = datasets["test"], datasets["student"]
+        config_teacher = PateTeacherConfig(
+            learning=config_teacher.learning,
+            fixmatch=FixmatchConfig(
+                model=FixmatchModelConfig(model_name="simple"),
+                mu=config_teacher.fixmatch.mu,
+                warmup=config_teacher.fixmatch.warmup,
+                use_ema=config_teacher.fixmatch.use_ema,
+                ema_decay=config_teacher.fixmatch.ema_decay,
+                amp=config_teacher.fixmatch.amp,
+                opt_level=config_teacher.fixmatch.opt_level,
+                T=config_teacher.fixmatch.T,
+                threshold=config_teacher.fixmatch.threshold,
+                lambda_u=config_teacher.fixmatch.lambda_u,
+            ),
+        )
+        fixmatch_config = config_teacher.fixmatch
+        n_classes = 10
+    elif config_common.dataset == "imdb":
+        datasets = get_imdb_dataloaders(
+            root=config_common.dataset_dir,
+            batch_size=config_teacher.learning.batch_size,
+            student_seed=config_common.seed + 100,
+            device=device
+        )
+        labeled_iterator, test_iterator = datasets["labeled"], datasets["test"]
+        vocab = datasets["vocab"]
+        pad_idx = datasets["pad_idx"]
+        
+        INPUT_DIM = len(vocab)
+        EMBEDDING_DIM = 100
+        HIDDEN_DIM = 256
+        OUTPUT_DIM = 1
+        N_LAYERS = 2
+        BIDIRECTIONAL = True
+        DROPOUT = 0.5
+
+        model = SentimentModel(
+            INPUT_DIM,
+            EMBEDDING_DIM,
+            HIDDEN_DIM,
+            OUTPUT_DIM,
+            N_LAYERS,
+            BIDIRECTIONAL,
+            DROPOUT,
+            pad_idx
+        )
+        
+        # Load GloVe embeddings
+        pretrained_embeddings = vocab.vectors
+        model.embedding.weight.data.copy_(pretrained_embeddings)
+        
+        # Zero out the embedding for the padding token
+        UNK_IDX = vocab.stoi[vocab.unk_token]
+        model.embedding.weight.data[UNK_IDX] = torch.zeros(EMBEDDING_DIM)
+        model.embedding.weight.data[pad_idx] = torch.zeros(EMBEDDING_DIM)
+
+        checkpoint_path = os.path.join(config_common.model_dir, f"teacher_{teacher_id}.ckp")
+        summary_writer = SummaryWriter(log_dir=config_common.tensorboard_log_dir)
+
+                # model, acc, loss = train_sentiment(
+        #     labeled_iterator=labeled_iterator,
+        #     test_iterator=test_iterator,
+        #     model=model,
+        #     learning_config=config_teacher.learning,
+        #     device=device,
+        #     writer=summary_writer,
+        #     writer_tag="teacher",
+        #     checkpoint_path=checkpoint_path,
+        # )
+        # logging.info(f"Finished training. Reported accuracy: {acc}")
+        # TODO: Implement voting for sentiment model
+        return
     else:
         raise ValueError(f"Unexpected dataset: {config_common.dataset}")
 
